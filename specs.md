@@ -48,7 +48,7 @@
 * **Kernel Computazionale AI:** `llama.cpp` + `whisper.cpp`.
   * **Backend GPU di default:** **Vulkan** (massima affidabilità su Radeon consumer/Windows).
   * **Backend alternativi caricati a runtime via `libloading`:** ROCm/HIP (AMD), CUDA (NVIDIA), Metal (Apple Silicon).
-* **Sintesi Vocale (TTS):** *da definire* (vedi §9). Candidati: Piper (ONNX, leggero), Kokoro/OuteTTS (qualità superiore), TTS di sistema.
+* **Sintesi Vocale (TTS):** **Piper** (VITS, ONNX) via crate `piper-rs` — leggero, gira su CPU riusando lo stesso ONNX Runtime (`ort`) dell'embedder (la GPU resta libera per Gemma), voci multilingua incluse l'italiano. (Decisione presa, vedi §9.)
 * **Database Vettoriale Embedded:** `LanceDB` (formato colonnare basato su Apache Arrow), schemi definiti come Arrow schema in Rust (vedi §5).
 * **Modello di Embedding Locale (CPU):** `all-MiniLM-L6-v2` (384 dim) via ONNX Runtime / Burn (~100 MB RAM).
 * **Modello Vision/Generazione:** **Gemma 4 12B-it QAT Q4_0** (GGUF ufficiale Google, Apache 2.0, rilasciato giugno 2026). Architettura **encoder-free unificata**: input testo/immagine/audio(≤30s)/video(≤60s @1fps), output testo. File ~7 GB, contesto fino a 256K (consigliato 32K per reattività). **Vision in `llama.cpp`:** richiede `llama-mtmd-cli` + file **mmproj** GGUF separato. L'**audio nativo (≤30s)** può coprire comandi vocali brevi anche senza Whisper.
@@ -213,7 +213,7 @@ Schemi logici (rappresentazione illustrativa; l'implementazione reale è un Arro
 
 ## 9. Decisioni Aperte
 
-* **Motore TTS:** *non ancora deciso.* (Piper / Kokoro-OuteTTS / TTS di sistema.)
+* **Motore TTS:** ~~non ancora deciso~~ → **deciso: Piper** (ONNX via `piper-rs`, CPU, riusa `ort`). Scelto per leggerezza e riuso dell'infrastruttura ONNX esistente. Kokoro/OuteTTS restano possibili upgrade qualità futuri.
 * **Meccanismo di cifratura a riposo:** scelta tra cifratura applicativa, file-based, o affidamento a cifratura disco di sistema.
 * **Wake-word per UC-02:** se/come implementarla mantenendo il default push-to-talk.
 

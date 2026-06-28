@@ -15,9 +15,11 @@ pub mod llama;
 pub mod privacy;
 pub mod rag;
 pub mod router;
+pub mod tts;
 
 pub use embedder::{MiniLmEmbedder, MiniLmVariant, MINILM_MODEL_VERSION};
 pub use engine::{Embedder, LlmEngine, LlmError, TokenStream, EMBEDDING_DIM};
 pub use llama::{LlamaConfig, LlamaEngine};
 pub use privacy::{BlockReason, GuardDecision, PrivacyGuard, TabId, UrlCategory, UrlClassifier};
 pub use router::{HardwareProfile, InferenceRouter, Route};
+pub use tts::{PiperTts, Tts, TtsAudio};

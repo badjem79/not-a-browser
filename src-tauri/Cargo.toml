@@ -35,6 +35,9 @@ tokio-stream = "0.1"
 llama-cpp-2 = { version = "0.1.150", features = ["vulkan", "mtmd"] }
 encoding_rs = "0.8"
 
+# --- TTS (Speech): Piper (ONNX, CPU) — reuses the same ort rc.12 as the embedder ---
+piper-rs = "0.2"
+
 # --- MiniLM embedder (ONNX Runtime, CPU) ---
 ort = "=2.0.0-rc.12"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
