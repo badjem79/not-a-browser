@@ -1,0 +1,46 @@
+:root {
+  --bg: #0b0b0f;
+  --bg-elev: #15151d;
+  --text: #ececf1;
+  --muted: #8b8b9a;
+  --line: #262631;
+  --ask: #8b6cff; /* AI / "chiedi" accent */
+  --nav: #46c2ff; /* navigate / "vai" accent */
+  --danger: #ff6b6b;
+  --radius: 16px;
+
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #1a1a26 0%, transparent 60%),
+    var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--ask) 40%, transparent);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}

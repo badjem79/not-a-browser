@@ -14,8 +14,10 @@
     "windows": [
       {
         "title": "!aBrowser",
-        "width": 800,
-        "height": 600
+        "width": 1100,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 480
       }
     ],
     "security": {
