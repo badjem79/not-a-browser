@@ -1,0 +1,50 @@
+[package]
+name = "not-a-browser"
+version = "0.1.0"
+description = "!aBrowser — not a browser: an AI-augmented shell over the OS WebView"
+authors = ["!aBrowser contributors"]
+edition = "2021"
+license = "Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "not_a_browser_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- AI Execution Engine (Phase 1) ---
+async-trait = "0.1"
+futures = "0.3"
+url = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+tokio-stream = "0.1"
+
+# --- Generation backend: llama.cpp (Vulkan) ---
+llama-cpp-2 = { version = "0.1.150", features = ["vulkan"] }
+encoding_rs = "0.8"
+
+# --- MiniLM embedder (ONNX Runtime, CPU) ---
+ort = "=2.0.0-rc.12"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
+# --- LanceDB RAG store (Apache Arrow columnar) ---
+lancedb = "0.30"
+arrow-array = "58"
+arrow-schema = "58"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+

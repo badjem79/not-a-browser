@@ -1,0 +1,17 @@
+!aBrowser ("not a browser")
+Copyright 2026 !aBrowser contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This software builds on third-party open-source components, each under its
+own license, including (non-exhaustively):
+  - llama.cpp                         (MIT)
+  - LanceDB / Lance                   (Apache-2.0)
+  - ONNX Runtime (via the `ort` crate) (MIT)
+  - Hugging Face `tokenizers`         (Apache-2.0)
+  - Tauri / wry                       (Apache-2.0 / MIT)
+
+AI model weights are NOT part of this repository and are downloaded separately
+under their own licenses:
+  - Gemma 4 (Google) — Gemma Terms of Use
+  - all-MiniLM-L6-v2 — Apache-2.0
