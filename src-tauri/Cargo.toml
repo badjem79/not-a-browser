@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 tokio-stream = "0.1"
 
 # --- Generation backend: llama.cpp (Vulkan) ---
-llama-cpp-2 = { version = "0.1.150", features = ["vulkan"] }
+llama-cpp-2 = { version = "0.1.150", features = ["vulkan", "mtmd"] }
 encoding_rs = "0.8"
 
 # --- MiniLM embedder (ONNX Runtime, CPU) ---

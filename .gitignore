@@ -64,3 +64,6 @@ desktop.ini
 # --- Misc / local tooling ---
 *.tmp
 scratchpad/
+
+# --- Local media scratch (may contain personal content; not for a public repo) ---
+/tests/
