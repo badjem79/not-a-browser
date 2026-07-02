@@ -216,6 +216,7 @@ Schemi logici (rappresentazione illustrativa; l'implementazione reale è un Arro
 * **Motore TTS:** ~~non ancora deciso~~ → **deciso: Piper** (ONNX via `piper-rs`, CPU, riusa `ort`). Scelto per leggerezza e riuso dell'infrastruttura ONNX esistente. Kokoro/OuteTTS restano possibili upgrade qualità futuri.
 * **Meccanismo di cifratura a riposo:** scelta tra cifratura applicativa, file-based, o affidamento a cifratura disco di sistema.
 * **Wake-word per UC-02:** se/come implementarla mantenendo il default push-to-talk.
+* **Tool di ricerca web per l'LLM (idea):** esporre a Gemma un tool di ricerca web via function-calling, con il **vincolo che le query partano dalla macchina locale** (IP/WebView dell'utente, non proxy cloud/nostri server) per la privacy. Risultati come output del tool / contesto RAG, con citazioni; gate obbligatorio della Privacy Guard prima di ogni richiesta in uscita. Si innesta sulla cucitura `LlmEngine`/router e sull'albero di contesto (§11).
 
 ---
 
@@ -235,3 +236,54 @@ L'engine AI viene costruito e testato **senza UI** prima di integrare il browser
 * **Fase 3 — Browser shell:** UI Tauri (barra + HUD), tab isolati, JS injection per estrazione DOM, wiring degli use-case UC-01..04.
 * **Fase 4 — Setup Wizard (UC-05):** detect hardware, download verificato di modelli e librerie GPU, `libloading`.
 * **Fase 5 — Hardening:** cifratura a riposo, fallback cloud con consenso, retention/cancellazione, packaging multi-OS.
+* **Fase 6 — Inference server (split a 3 processi):** estrarre l'AI Execution Engine in un **processo separato** (model server: llama.cpp + Vulkan, modello residente in VRAM) distinto da WebView e Core. Implementato come `RemoteEngine` dietro il trait `LlmEngine` esistente, comunicazione via IPC (named pipe / socket locale, streaming token). Benefici: (a) **dev** — il modello resta caldo tra le ricompilazioni del Core, niente reload da ~7 GB ad ogni build; (b) **prod** — isolamento dai crash del codice nativo llama/Vulkan (la UI/il browser sopravvivono e si riavvia solo il server), coerente con la filosofia multi-processo. Da affrontare quando l'iterazione sul Rust dell'engine si intensifica o per la robustezza in release; la cucitura del trait è già pronta.
+
+---
+
+## 11. Modello Tab/Sessioni: Albero di Contesto
+
+Sostituisce le tab piatte (che incoraggiano l'accumulo) con un **albero di contesto** mostrato in una dashboard laterale, aperta dal pulsante **"!"** (sempre visibile, anche in modalità launcher; funge da burger menu). La dashboard contiene anche i controlli pagina (**◀ indietro / ▶ avanti / ⟳ reload**).
+
+**Nodo = un "posto/sessione"** con una propria cronologia interna. Tipi: `pagina` · `chat` · `cartella`.
+
+### 11.1 Ramificazione — solo sui "salti di contesto"
+L'albero genera un figlio **solo** quando cambia la *fonte* di contesto, non ad ogni navigazione:
+* da una **pagina** → domanda nell'omnibox ⇒ nasce una **chat figlia** (contesto = pagina + ancestor);
+* da una **chat** → apri un link ⇒ nasce una **pagina figlia** sotto la chat (la chat resta richiamabile);
+* **"apri in nuovo ramo"** esplicito ⇒ figlio manuale;
+* **URL nuovo** nell'omnibox mentre navighi ⇒ nuovo **nodo radice**.
+
+**Non** ramificano: navigare tra link *dentro* una pagina (= cronologia interna del nodo, i tasti ◀ ▶), e i **follow-up** in una chat (restano nel nodo).
+
+### 11.2 La posizione È il contesto
+Ogni nodo ha **un solo genitore = dove sta adesso**. Alla nascita è il genitore del salto di contesto (lignaggio automatico). **Spostare** un nodo (in una cartella o a radice) **recide** il vecchio legame: è una ri-contestualizzazione deliberata, il padre originario viene dimenticato. Il contesto di una domanda si calcola **sempre** risalendo gli ancestor *attuali*.
+
+### 11.3 Cartelle = scope + system prompt
+La cartella ha `nome` + `descrizione`. Raggruppa item correlati e agisce su **due canali distinti** per ogni domanda fatta al suo interno (o sotto di essa):
+* **System prompt** (*come* rispondere): la **descrizione** della cartella;
+* **Contesto** (*su cosa*): i **contenuti** della cartella, recuperati via **RAG top-k** (gestibile anche con molti item).
+
+**Composizione su annidamento:** risalendo gli antenati, le descrizioni dei system prompt si **compongono** (esterno → interno: la sotto-cartella raffina la madre), e gli scope di contesto si uniscono.
+
+**Flag per-cartella `eredita-dal-padre`** (default ON): se spento, la cartella è una **frontiera sigillata** — blocca l'ereditarietà *sia* del contesto *sia* dei system prompt degli antenati. Nel calcolo: risali gli ancestor e **fermati** appena attraversi una cartella con flag OFF (inclusa come tetto, sopra non si va).
+
+### 11.4 Assemblaggio prompt per una domanda al nodo N
+1. **System** = descrizioni delle cartelle-antenate di N (esterno → interno, fino a un'eventuale frontiera sigillata).
+2. **Contesto** = RAG top-k sullo scope di N (catena ancestor + contenuti cartella, fino alla frontiera).
+3. **Domanda** = testo digitato.
+
+(La `generate_text` del trait acquisisce lo slot **system**, mappato sulla casella system del chat template Gemma.)
+
+### 11.5 Anti-stale
+`lastTouchedAt` per nodo guida il **decadimento**: i rami non toccati da X tempo sbiadiscono / si auto-collassano / scivolano in un ramo **Archivio**, con nudge dell'AI ("hai N rami abbandonati, li archivio?").
+
+### 11.6 Modello dati nodo (mappa sul RAG di §5)
+`id · tipo(pagina|chat|cartella) · titolo · url|messaggi · descrizione(solo cartelle) · ereditaPadre(solo cartelle, bool) · genitoreId · createdAt · lastTouchedAt` con riferimento alle righe `web_history` / `chat_history`.
+
+### 11.7 Build incrementale (ogni step testabile)
+1. Pannello "!" + controlli ◀ ▶ ⟳ sulla content webview (via JS injection).
+2. Albero di sole **pagine** (radici + cronologia interna + nodo attivo).
+3. **Chat** come nodi: domanda-da-pagina ⇒ chat figlia; contesto ancestor via RAG.
+4. Secondo ponte: **chat → link ⇒ pagina figlia**.
+5. **Cartelle** + drag + `descrizione`/`eredita` (system prompt + scope).
+6. **Decadimento/Archivio** + nudge AI.

@@ -18,10 +18,16 @@ $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 $env:PROTOC = "C:\Users\mrjar\tools\protoc\bin\protoc.exe"
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.350.0"
 
-# 3. Short build path (Windows MAX_PATH) — map B: -> src-tauri\target
-if (-not (Test-Path "B:\")) {
-  subst B: "$PSScriptRoot\src-tauri\target"
-}
+# 3. Short build path (Windows MAX_PATH) — map B: -> src-tauri\target.
+# llama.cpp's ggml-vulkan build emits deeply-nested shader files that blow past
+# MAX_PATH even with long-paths enabled, so we keep the target dir behind a short
+# drive letter. `cargo clean` deletes/recreates the target dir, which leaves a
+# stale (broken) B: mapping — so always recreate it cleanly rather than trusting
+# a `Test-Path B:\` that lies when the mapping is dangling.
+$target = "$PSScriptRoot\src-tauri\target"
+if (-not (Test-Path $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }
+cmd /c "subst /D B:" 2>$null | Out-Null   # drop any existing/stale mapping
+subst B: $target
 $env:CARGO_TARGET_DIR = "B:\"
 
 Set-Location $PSScriptRoot

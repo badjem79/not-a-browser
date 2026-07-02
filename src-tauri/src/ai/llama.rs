@@ -83,11 +83,19 @@ pub struct LlamaEngine {
 
 impl LlamaEngine {
     /// Load a GGUF model from disk and offload it to the GPU. This is heavy
-    /// (mmaps ~7 GB and uploads weights to VRAM); call it off the UI thread.
+    /// (reads ~7 GB and uploads weights to VRAM); call it off the UI thread.
     /// When `config.mmproj_path` is set, the multimodal projector is loaded too.
     pub fn load(model_path: impl AsRef<Path>, config: LlamaConfig) -> Result<Self, LlmError> {
         let backend = backend();
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(config.n_gpu_layers);
+        // `use_mmap(false)`: with full GPU offload the weights live in VRAM, so we
+        // don't want the ~7 GB GGUF also kept resident as an mmap'd page cache in
+        // RAM. Disabling mmap frees the host-side copy after upload to VRAM —
+        // lower steady-state RAM (the project's minimal-footprint goal) at the
+        // cost of a slightly slower cold load (the file is read instead of lazily
+        // mapped). Weights stay in VRAM for the whole session regardless.
+        let model_params = LlamaModelParams::default()
+            .with_n_gpu_layers(config.n_gpu_layers)
+            .with_use_mmap(false);
         let model = LlamaModel::load_from_file(backend, model_path, &model_params)
             .map_err(|e| LlmError::InferenceFailed(format!("load model: {e}")))?;
 
