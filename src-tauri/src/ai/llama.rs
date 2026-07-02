@@ -226,9 +226,10 @@ impl LlmEngine for LlamaEngine {
     async fn generate_chat(
         &self,
         history: &[ChatTurn],
+        system: &str,
         context: &str,
     ) -> Result<TokenStream, LlmError> {
-        Ok(self.spawn_generation(format_gemma4_chat(history, context)))
+        Ok(self.spawn_generation(format_gemma4_chat(history, system, context)))
     }
 
     async fn analyze_image(
@@ -269,6 +270,7 @@ fn format_gemma4_prompt(prompt: &str, context: &str) -> String {
             role: ChatRole::User,
             text: prompt.to_string(),
         }],
+        "",
         context,
     )
 }
@@ -276,18 +278,25 @@ fn format_gemma4_prompt(prompt: &str, context: &str) -> String {
 /// Wrap a full multi-turn conversation in Gemma 4's chat format, thinking
 /// disabled. `history` is the ordered exchange ending with the latest user
 /// turn; each turn becomes its own `<|turn>{role}…<turn|>` block so the model
-/// truly sees the conversation (not just the last question). `context` (ancestor
-/// grounding) is prepended to the **first** user turn — Gemma has no system role.
-/// A fresh assistant turn is opened at the end with the primed empty thought
-/// channel so generation starts on the answer.
-fn format_gemma4_chat(history: &[ChatTurn], context: &str) -> String {
+/// truly sees the conversation (not just the last question). Gemma has no
+/// dedicated system role, so `system` (persona / how-to-answer) and `context`
+/// (grounding) are prepended to the **first** user turn, system first. A fresh
+/// assistant turn is opened at the end with the primed empty thought channel so
+/// generation starts on the answer.
+fn format_gemma4_chat(history: &[ChatTurn], system: &str, context: &str) -> String {
     let mut s = String::new();
     let mut first_user = true;
+    let preamble = match (system.trim().is_empty(), context.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("{system}\n\n"),
+        (true, false) => format!("{context}\n\n"),
+        (false, false) => format!("{system}\n\n{context}\n\n"),
+    };
     for turn in history {
         match turn.role {
             ChatRole::User => {
-                let body = if first_user && !context.trim().is_empty() {
-                    format!("{context}\n\n{}", turn.text)
+                let body = if first_user {
+                    format!("{preamble}{}", turn.text)
                 } else {
                     turn.text.clone()
                 };
@@ -519,7 +528,7 @@ mod tests {
             ChatTurn { role: ChatRole::Model, text: "Sono Gemma.".into() },
             ChatTurn { role: ChatRole::User, text: "E quanti anni hai?".into() },
         ];
-        let p = format_gemma4_chat(&history, "");
+        let p = format_gemma4_chat(&history, "", "");
         // All three turns are present, in order, each in its own turn block:
         // the model can only answer the follow-up if it sees the earlier ones.
         assert!(p.contains("<|turn>user\nCome ti chiami?<turn|>"));
@@ -531,10 +540,11 @@ mod tests {
         assert!(first < second && second < third, "turns must stay ordered");
         // Ends primed for a fresh answer with thinking disabled.
         assert!(p.ends_with("<|turn>model\n<|channel>thought\n<channel|>"));
-        // Context lands on the FIRST user turn only.
-        let with_ctx = format_gemma4_chat(&history, "CTX");
-        assert!(with_ctx.contains("<|turn>user\nCTX\n\nCome ti chiami?<turn|>"));
-        assert_eq!(with_ctx.matches("CTX").count(), 1);
+        // System + context land on the FIRST user turn only, system before context.
+        let framed = format_gemma4_chat(&history, "SYS", "CTX");
+        assert!(framed.contains("<|turn>user\nSYS\n\nCTX\n\nCome ti chiami?<turn|>"));
+        assert_eq!(framed.matches("SYS").count(), 1);
+        assert_eq!(framed.matches("CTX").count(), 1);
     }
 
     #[tokio::test]

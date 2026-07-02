@@ -38,6 +38,8 @@
   let pendingShow: Node | null = null;
   // Chat whose model reply is currently being streamed into (token target).
   let streamingChatId: string | null = null;
+  // New chat awaiting an LLM-generated short title once its first reply is done.
+  let titlePendingChatId: string | null = null;
 
   const mode = $derived<"navigate" | "ask">(looksLikeUrl(query) ? "navigate" : "ask");
   const busy = $derived(status === "loading-model" || status === "generating");
@@ -101,6 +103,20 @@
       listen("ai-done", () => {
         status = "done";
         streamingChatId = null;
+        // Refine a new chat's provisional (truncated) title with an LLM summary.
+        if (titlePendingChatId) {
+          const id = titlePendingChatId;
+          titlePendingChatId = null;
+          const node = nodes.find((n) => n.id === id);
+          const firstQ = node?.messages?.find((m) => m.role === "user")?.text;
+          if (node && firstQ) {
+            invoke<string>("summarize_title", { text: firstQ })
+              .then((t) => {
+                if (t && t.trim()) node.title = t.trim();
+              })
+              .catch(() => {});
+          }
+        }
       }),
       listen<string>("ai-error", (e) => {
         const chat = nodes.find((n) => n.id === streamingChatId);
@@ -165,6 +181,7 @@
         messages: [],
       };
       nodes = [...nodes, chat];
+      titlePendingChatId = chat.id; // refine to an LLM summary after the reply
     }
 
     if (view === "browse") await invoke("home").catch(() => {});

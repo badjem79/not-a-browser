@@ -81,13 +81,17 @@ pub trait LlmEngine: Send + Sync {
 
     /// Streaming **multi-turn** generation: `history` is the ordered conversation
     /// (ending with the latest user turn) so the model remembers the exchange
-    /// (§11.1 follow-ups stay in the node). `context` is the ancestor grounding.
+    /// (§11.1 follow-ups stay in the node). `system` is the persona / how-to-answer
+    /// framing (§11.3/§11.4 — product persona plus ancestor-folder descriptions);
+    /// `context` is the *what* (ancestor/RAG grounding).
     ///
-    /// Default: fall back to a single-turn call on the last user message, so
-    /// backends that don't model a conversation still work.
+    /// Default: fold `system` + `context` together and fall back to a single-turn
+    /// call on the last user message, so backends that don't model a conversation
+    /// still work.
     async fn generate_chat(
         &self,
         history: &[ChatTurn],
+        system: &str,
         context: &str,
     ) -> Result<TokenStream, LlmError> {
         let last = history
@@ -96,7 +100,12 @@ pub trait LlmEngine: Send + Sync {
             .find(|t| t.role == ChatRole::User)
             .map(|t| t.text.as_str())
             .unwrap_or("");
-        self.generate_text(last, context).await
+        let combined = match (system.trim().is_empty(), context.trim().is_empty()) {
+            (true, _) => context.to_string(),
+            (false, true) => system.to_string(),
+            (false, false) => format!("{system}\n\n{context}"),
+        };
+        self.generate_text(last, &combined).await
     }
 
     /// Streaming multimodal image analysis (transcribe / explain / translate).

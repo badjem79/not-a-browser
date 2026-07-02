@@ -19,6 +19,22 @@ use crate::ai::llama::{LlamaConfig, LlamaEngine};
 const MODEL_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/models/gemma/gemma-4-12b-it-Q4_0.gguf");
 
+/// The product persona (§11.3/§11.4 system slot). Prepended to every chat so the
+/// model acts as !aBrowser's browsing assistant rather than a generic "Gemma".
+/// Kept deliberately short — it costs tokens on every turn — and forward-looking
+/// to the agentic browser commands it will gain. Per-folder system prompts will
+/// later compose *after* this base (§11.3).
+const BROWSER_SYSTEM_PROMPT: &str = "\
+Sei l'assistente integrato di !aBrowser, un browser web focalizzato sulla privacy \
+con AI locale. Non sei un chatbot generico: sei un aiuto concreto alla navigazione. \
+Ti identifichi come l'assistente di !aBrowser e non menzioni mai il modello \
+sottostante né ti presenti come \"Gemma\". Rispondi sempre nella lingua dell'utente, \
+in modo diretto, conciso e utile, senza preamboli superflui. Quando ti viene fornito \
+il contesto della pagina o della conversazione, basati su quello. In futuro potrai \
+eseguire azioni nel browser (aprire pagine, cercare nella cronologia semantica, \
+organizzare le sessioni in un albero di contesto): ragiona già come un assistente \
+operativo, non solo conversazionale.";
+
 /// Height (logical px) of the top bar. The chrome webview spans the whole window
 /// (so it can also draw the side dashboard); the content webview is inset below
 /// this bar — the chrome shows through above it.
@@ -242,7 +258,7 @@ async fn ask(
     let _ = app.emit("ai-status", "generating");
 
     let mut stream = engine
-        .generate_chat(&history, &context)
+        .generate_chat(&history, BROWSER_SYSTEM_PROMPT, &context)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -261,13 +277,55 @@ async fn ask(
     Ok(())
 }
 
+/// Produce a very short title (a few words) summarising `text`, for labelling a
+/// chat node in the context tree instead of the raw first question. One-shot,
+/// non-streamed, no browser persona — a neutral utility call; the stream is cut
+/// early (first line / short cap) to keep it fast.
+#[tauri::command]
+async fn summarize_title(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<String, String> {
+    let engine = state.engine(&app).await?;
+    let prompt = format!(
+        "Riassumi l'argomento di questa richiesta in un titolo brevissimo, massimo 5 \
+         parole, nella stessa lingua, senza virgolette e senza punto finale. \
+         Rispondi solo con il titolo.\n\nRichiesta: {text}"
+    );
+    let mut stream = engine
+        .generate_text(&prompt, "")
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut out = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let Ok(token) = chunk {
+            out.push_str(&token);
+        }
+        // A title is one short line; stop as soon as we have enough.
+        if out.contains('\n') || out.chars().count() > 80 {
+            break;
+        }
+    }
+
+    let title = out
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(['"', '\'', '*', '#', '.', ' '])
+        .to_string();
+    Ok(title)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            ask, show_page, close_page, home, set_panel, page_nav
+            ask, summarize_title, show_page, close_page, home, set_panel, page_nav
         ])
         .setup(|app| {
             let window = WindowBuilder::new(app, "main")
