@@ -47,8 +47,8 @@ fn backend() -> &'static LlamaBackend {
 pub struct LlamaConfig {
     /// Layers to offload to the GPU. `999` = the whole model on Vulkan.
     pub n_gpu_layers: u32,
-    /// Context window in tokens (KV cache size). 4096 is a comfortable default;
-    /// Gemma supports far more, at higher VRAM cost (specs §4.1).
+    /// Context window in tokens (KV cache size). 8192 gives multi-turn chats
+    /// room to grow; Gemma supports far more, at higher VRAM cost (specs §4.1).
     pub n_ctx: u32,
     /// Logical batch size for prompt/media prefill.
     pub n_batch: i32,
@@ -63,7 +63,7 @@ impl Default for LlamaConfig {
     fn default() -> Self {
         Self {
             n_gpu_layers: 999,
-            n_ctx: 4096,
+            n_ctx: 8192,
             n_batch: 512,
             n_predict: 512,
             mmproj_path: None,
@@ -166,11 +166,12 @@ impl LlamaEngine {
     fn spawn_generation(&self, full_prompt: String) -> TokenStream {
         let model = self.model.clone();
         let n_ctx = self.config.n_ctx;
+        let n_batch = self.config.n_batch;
         let n_predict = self.config.n_predict;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, LlmError>>(64);
         std::thread::spawn(move || {
-            if let Err(e) = run_generation(&model, &full_prompt, n_ctx, n_predict, &tx) {
+            if let Err(e) = run_generation(&model, &full_prompt, n_ctx, n_batch, n_predict, &tx) {
                 let _ = tx.blocking_send(Err(e));
             }
         });
@@ -313,15 +314,23 @@ fn format_gemma4_media_prompt(instruction: &str) -> String {
 }
 
 /// Text generation: tokenize + prefill the prompt, then run the decode loop.
+///
+/// Prefill is done in `n_batch`-sized chunks so a long (multi-turn) prompt can
+/// be far larger than a single batch — feeding it all at once is what overflowed
+/// the old fixed-512 batch ("Insufficient Space of 512"). `n_predict` is clamped
+/// so prompt + reply always fit the `n_ctx` KV cache.
 fn run_generation(
     model: &LlamaModel,
     prompt: &str,
     n_ctx: u32,
+    n_batch: i32,
     n_predict: i32,
     tx: &Sender<Result<String, LlmError>>,
 ) -> Result<(), LlmError> {
     let backend = backend();
-    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(n_ctx))
+        .with_n_batch(n_batch.max(1) as u32);
     let mut ctx = model
         .new_context(backend, ctx_params)
         .map_err(|e| LlmError::InferenceFailed(format!("create context: {e}")))?;
@@ -336,18 +345,38 @@ fn run_generation(
         .str_to_token(prompt, add_bos)
         .map_err(|e| LlmError::InferenceFailed(format!("tokenize: {e}")))?;
 
-    // Feed the prompt: only the last token needs its logits computed.
-    let mut batch = LlamaBatch::new(512, 1);
-    let last = tokens.len() as i32 - 1;
-    for (i, token) in (0_i32..).zip(tokens.into_iter()) {
-        batch
-            .add(token, i, &[0], i == last)
-            .map_err(|e| LlmError::InferenceFailed(format!("batch add: {e}")))?;
+    // Leave room for at least a short reply; refuse rather than crash mid-decode
+    // when the KV cache is full.
+    let room = n_ctx as i32 - tokens.len() as i32 - 1;
+    if room < 16 {
+        return Err(LlmError::InferenceFailed(format!(
+            "conversazione troppo lunga per il contesto da {n_ctx} token \
+             ({} token nel prompt) — apri una nuova chat o aumenta n_ctx",
+            tokens.len()
+        )));
     }
-    ctx.decode(&mut batch)
-        .map_err(|e| LlmError::InferenceFailed(format!("decode prompt: {e}")))?;
+    let n_predict = n_predict.min(room);
 
-    decode_loop(model, &mut ctx, batch.n_tokens(), n_predict, tx)
+    // Prefill in chunks; only the very last token needs its logits computed
+    // (that's where sampling starts).
+    let cap = n_batch.max(1) as usize;
+    let mut batch = LlamaBatch::new(cap, 1);
+    let last = tokens.len() - 1;
+    let mut pos = 0usize;
+    while pos < tokens.len() {
+        let end = (pos + cap).min(tokens.len());
+        batch.clear();
+        for i in pos..end {
+            batch
+                .add(tokens[i], i as i32, &[0], i == last)
+                .map_err(|e| LlmError::InferenceFailed(format!("batch add: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| LlmError::InferenceFailed(format!("decode prompt: {e}")))?;
+        pos = end;
+    }
+
+    decode_loop(model, &mut ctx, tokens.len() as i32, n_predict, tx)
 }
 
 /// Multimodal generation: prefill text+media chunks via `mtmd`, then decode.
