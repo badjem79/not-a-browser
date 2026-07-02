@@ -32,7 +32,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::ai::engine::{LlmEngine, LlmError, TokenStream};
+use crate::ai::engine::{ChatRole, ChatTurn, LlmEngine, LlmError, TokenStream};
 
 /// Process-global llama backend. `LlamaBackend::init()` must run exactly once
 /// per process; the model/context APIs only take `&LlamaBackend` as a witness
@@ -160,6 +160,23 @@ impl LlamaEngine {
     /// Shared multimodal entry point: build a bitmap (inside the worker thread,
     /// where the `MtmdContext` lives), then run the mtmd prefill + decode loop,
     /// streaming tokens back.
+    /// Run a fully-formatted text prompt on a background thread, streaming tokens
+    /// back over an MPSC channel wrapped as a [`TokenStream`]. Shared by the
+    /// single-turn (`generate_text`) and multi-turn (`generate_chat`) paths.
+    fn spawn_generation(&self, full_prompt: String) -> TokenStream {
+        let model = self.model.clone();
+        let n_ctx = self.config.n_ctx;
+        let n_predict = self.config.n_predict;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, LlmError>>(64);
+        std::thread::spawn(move || {
+            if let Err(e) = run_generation(&model, &full_prompt, n_ctx, n_predict, &tx) {
+                let _ = tx.blocking_send(Err(e));
+            }
+        });
+        Box::pin(ReceiverStream::new(rx))
+    }
+
     fn spawn_mtmd<F>(&self, full_prompt: String, build_bitmap: F) -> Result<TokenStream, LlmError>
     where
         F: FnOnce(&MtmdContext) -> Result<MtmdBitmap, LlmError> + Send + 'static,
@@ -202,19 +219,15 @@ pub fn chunk_audio_pcm(samples: &[f32], sample_rate: u32, window_secs: u32) -> V
 #[async_trait]
 impl LlmEngine for LlamaEngine {
     async fn generate_text(&self, prompt: &str, context: &str) -> Result<TokenStream, LlmError> {
-        let full_prompt = format_gemma4_prompt(prompt, context);
-        let model = self.model.clone();
-        let n_ctx = self.config.n_ctx;
-        let n_predict = self.config.n_predict;
+        Ok(self.spawn_generation(format_gemma4_prompt(prompt, context)))
+    }
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, LlmError>>(64);
-        std::thread::spawn(move || {
-            if let Err(e) = run_generation(&model, &full_prompt, n_ctx, n_predict, &tx) {
-                let _ = tx.blocking_send(Err(e));
-            }
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
+    async fn generate_chat(
+        &self,
+        history: &[ChatTurn],
+        context: &str,
+    ) -> Result<TokenStream, LlmError> {
+        Ok(self.spawn_generation(format_gemma4_chat(history, context)))
     }
 
     async fn analyze_image(
@@ -250,12 +263,43 @@ impl LlmEngine for LlamaEngine {
 /// (Gemma has no dedicated system role). Tokenize with `parse_special=true` so
 /// the `<|turn>` / `<|channel>` control strings become their special tokens.
 fn format_gemma4_prompt(prompt: &str, context: &str) -> String {
-    let user = if context.trim().is_empty() {
-        prompt.to_string()
-    } else {
-        format!("{context}\n\n{prompt}")
-    };
-    format!("<|turn>user\n{user}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>")
+    format_gemma4_chat(
+        &[ChatTurn {
+            role: ChatRole::User,
+            text: prompt.to_string(),
+        }],
+        context,
+    )
+}
+
+/// Wrap a full multi-turn conversation in Gemma 4's chat format, thinking
+/// disabled. `history` is the ordered exchange ending with the latest user
+/// turn; each turn becomes its own `<|turn>{role}…<turn|>` block so the model
+/// truly sees the conversation (not just the last question). `context` (ancestor
+/// grounding) is prepended to the **first** user turn — Gemma has no system role.
+/// A fresh assistant turn is opened at the end with the primed empty thought
+/// channel so generation starts on the answer.
+fn format_gemma4_chat(history: &[ChatTurn], context: &str) -> String {
+    let mut s = String::new();
+    let mut first_user = true;
+    for turn in history {
+        match turn.role {
+            ChatRole::User => {
+                let body = if first_user && !context.trim().is_empty() {
+                    format!("{context}\n\n{}", turn.text)
+                } else {
+                    turn.text.clone()
+                };
+                first_user = false;
+                s.push_str(&format!("<|turn>user\n{body}<turn|>\n"));
+            }
+            ChatRole::Model => {
+                s.push_str(&format!("<|turn>model\n{}<turn|>\n", turn.text));
+            }
+        }
+    }
+    s.push_str("<|turn>model\n<|channel>thought\n<channel|>");
+    s
 }
 
 /// Gemma 4 prompt for a single media input. The `<__media__>` marker is replaced
@@ -437,6 +481,31 @@ mod tests {
         assert!(p.ends_with("<|turn>model\n<|channel>thought\n<channel|>"));
         let with_ctx = format_gemma4_prompt("Q", "DOC");
         assert!(with_ctx.contains("DOC\n\nQ"));
+    }
+
+    #[test]
+    fn gemma4_chat_includes_every_prior_turn() {
+        let history = vec![
+            ChatTurn { role: ChatRole::User, text: "Come ti chiami?".into() },
+            ChatTurn { role: ChatRole::Model, text: "Sono Gemma.".into() },
+            ChatTurn { role: ChatRole::User, text: "E quanti anni hai?".into() },
+        ];
+        let p = format_gemma4_chat(&history, "");
+        // All three turns are present, in order, each in its own turn block:
+        // the model can only answer the follow-up if it sees the earlier ones.
+        assert!(p.contains("<|turn>user\nCome ti chiami?<turn|>"));
+        assert!(p.contains("<|turn>model\nSono Gemma.<turn|>"));
+        assert!(p.contains("<|turn>user\nE quanti anni hai?<turn|>"));
+        let first = p.find("Come ti chiami?").unwrap();
+        let second = p.find("Sono Gemma.").unwrap();
+        let third = p.find("E quanti anni hai?").unwrap();
+        assert!(first < second && second < third, "turns must stay ordered");
+        // Ends primed for a fresh answer with thinking disabled.
+        assert!(p.ends_with("<|turn>model\n<|channel>thought\n<channel|>"));
+        // Context lands on the FIRST user turn only.
+        let with_ctx = format_gemma4_chat(&history, "CTX");
+        assert!(with_ctx.contains("<|turn>user\nCTX\n\nCome ti chiami?<turn|>"));
+        assert_eq!(with_ctx.matches("CTX").count(), 1);
     }
 
     #[tokio::test]

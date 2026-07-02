@@ -14,6 +14,23 @@ use std::fmt;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
+
+/// Who authored a turn in a chat node's conversation (§11.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    User,
+    Model,
+}
+
+/// One turn of a chat-node conversation. The ordered history is what gives the
+/// model memory of the exchange so far — a follow-up sees every prior turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: ChatRole,
+    pub text: String,
+}
 
 /// Dimensionality of the embedding vectors produced by [`Embedder`].
 ///
@@ -61,6 +78,26 @@ pub trait LlmEngine: Send + Sync {
     /// Streaming text generation. `context` carries any RAG-retrieved material
     /// or system framing; `prompt` is the user turn.
     async fn generate_text(&self, prompt: &str, context: &str) -> Result<TokenStream, LlmError>;
+
+    /// Streaming **multi-turn** generation: `history` is the ordered conversation
+    /// (ending with the latest user turn) so the model remembers the exchange
+    /// (§11.1 follow-ups stay in the node). `context` is the ancestor grounding.
+    ///
+    /// Default: fall back to a single-turn call on the last user message, so
+    /// backends that don't model a conversation still work.
+    async fn generate_chat(
+        &self,
+        history: &[ChatTurn],
+        context: &str,
+    ) -> Result<TokenStream, LlmError> {
+        let last = history
+            .iter()
+            .rev()
+            .find(|t| t.role == ChatRole::User)
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
+        self.generate_text(last, context).await
+    }
 
     /// Streaming multimodal image analysis (transcribe / explain / translate).
     /// `image_bytes` is the raw encoded image (PNG/JPEG/…).

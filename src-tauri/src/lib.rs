@@ -4,14 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tauri::webview::WebviewBuilder;
+use tauri::webview::{PageLoadEvent, WebviewBuilder};
 use tauri::window::WindowBuilder;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WindowEvent,
 };
 use tokio::sync::Mutex;
 
-use crate::ai::engine::LlmEngine;
+use crate::ai::engine::{ChatTurn, LlmEngine};
 use crate::ai::llama::{LlamaConfig, LlamaEngine};
 
 /// Dev-time model location (baked at compile time). In production the setup
@@ -137,6 +137,7 @@ async fn show_page(
     url: String,
 ) -> Result<(), String> {
     let label = format!("page-{id}");
+    let node_id = id.clone();
     state.browsing.store(true, Ordering::SeqCst);
     *state.active_page.lock().unwrap() = Some(id);
     hide_other_pages(&app, &label);
@@ -147,8 +148,21 @@ async fn show_page(
         let target: tauri::Url = url.parse().map_err(|e| format!("URL non valido: {e}"))?;
         let (x, y, cw, ch) = content_rect(&app).ok_or("finestra non disponibile")?;
         let win = app.get_window("main").ok_or("finestra non disponibile")?;
+        // A page node "follows" navigation inside its own webview (in-page links,
+        // redirects, back/forward) — these are internal history, not context jumps
+        // (§11.1), so the node doesn't branch but its label tracks the current URL.
+        let nav = app.clone();
         win.add_child(
-            WebviewBuilder::new(label.as_str(), WebviewUrl::External(target)),
+            WebviewBuilder::new(label.as_str(), WebviewUrl::External(target)).on_page_load(
+                move |_wv, payload| {
+                    if payload.event() == PageLoadEvent::Finished {
+                        let _ = nav.emit(
+                            "page-loaded",
+                            serde_json::json!({ "id": node_id, "url": payload.url().to_string() }),
+                        );
+                    }
+                },
+            ),
             LogicalPosition::new(x, y),
             LogicalSize::new(cw, ch),
         )
@@ -213,13 +227,22 @@ async fn page_nav(app: AppHandle, action: String) -> Result<(), String> {
 
 /// Ask the local model. Tokens are streamed back to the UI as `ai-token` events;
 /// `ai-status` reports phase, `ai-done` signals completion, `ai-error` a failure.
+/// `history` is the chat node's full conversation (ordered, ending with the new
+/// user turn) so follow-ups keep their memory (§11.1). `context` carries the
+/// ancestor grounding assembled from the context tree (§11.4) — empty for a
+/// root-launcher question.
 #[tauri::command]
-async fn ask(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<(), String> {
+async fn ask(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    history: Vec<ChatTurn>,
+    context: String,
+) -> Result<(), String> {
     let engine = state.engine(&app).await?;
     let _ = app.emit("ai-status", "generating");
 
     let mut stream = engine
-        .generate_text(&prompt, "")
+        .generate_chat(&history, &context)
         .await
         .map_err(|e| e.to_string())?;
 
